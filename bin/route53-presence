@@ -10,7 +10,8 @@ import boto.route53
 from boto.route53.record import ResourceRecordSets
 
 parser = argparse.ArgumentParser(description='Register the local EC2 instance in Route53, updating an existing record')
-parser.add_argument('--domain-name', metavar='<NAME>', default=os.environ.get('DOMAIN_NAME'), help='Name of AWS Route 53 domain that should be used for registration')
+parser.add_argument('--public-hostname', metavar='<PUBLIC_HOSTNAME>', default=os.environ.get('PUBLIC_HOSTNAME'), help='Name of AWS Route 53 public hostname that should be used for registration')
+parser.add_argument('--private-hostname', metavar='<PRIVATE_HOSTNAME>', default=os.environ.get('PRIVATE_HOSTNAME'), help='Name of AWS Route 53 private hostname that should be used for registration')
 parser.add_argument('--access-key', metavar='<ACCESS>', default=os.environ.get('AWS_ACCESS_KEY'))
 parser.add_argument('--secret-key', metavar='<SECRET>', default=os.environ.get('AWS_SECRET_KEY'))
 args = parser.parse_args()
@@ -21,51 +22,76 @@ else:
     conn = boto.connect_route53()
 
 def get_zone_id(hostname):
-    domain = '.'.join(hostname.split('.')[1:])
-    zone = conn.get_hosted_zone_by_name(domain)
-    if not zone:
-        print "Domain {} can't be managed".format(domain)
-        exit(1)
-    return zone.GetHostedZoneResponse.Id.split('/')[2]
+    if hostname:
+        domain = '.'.join(hostname.split('.')[1:])
+        zone = conn.get_hosted_zone_by_name(domain)
+        if not zone:
+            print "Domain {} cannot be managed".format(domain)
+            sys.exit(1)
+        return zone.GetHostedZoneResponse.Id.split('/')[2]
+    else:
+        return
 
 instance_id = urllib2.urlopen('http://169.254.169.254/latest/meta-data/instance-id').read()
 public_ip = urllib2.urlopen('http://169.254.169.254/latest/meta-data/public-ipv4').read()
-zone_id = get_zone_id(args.domain_name)
+private_ip = urllib2.urlopen('http://169.254.169.254/latest/meta-data/local-ipv4').read()
 
-def register(domain_name, instance_id, public_ip):
-    print "Registering instance {} with public IP {} to domain {}".format(instance_id, public_ip, domain_name)
-    response = conn.get_all_rrsets(zone_id, 'A', domain_name, maxitems=1)[0]
-    if public_ip not in response.resource_records:
-        changes = ResourceRecordSets(conn, zone_id)
-        if response.resource_records and response.name == (domain_name + "."):
-            delete_change = changes.add_change("DELETE", domain_name, 'A', response.ttl)
-            for old_value in response.resource_records:
-                delete_change.add_value(old_value)
-        create_change = changes.add_change("CREATE", domain_name, 'A', response.ttl)
-        if response.name == (domain_name + "."):
+public_zone_id = get_zone_id(args.public_hostname)
+private_zone_id = get_zone_id(args.private_hostname)
+
+def register_hostname(hostname, instance_ip, zone_id):
+    response = conn.get_all_rrsets(zone_id, 'A', hostname, maxitems=1)[0]
+    changes = ResourceRecordSets(conn, zone_id)
+    if response.name == (hostname + "."):
+        if instance_ip not in response.resource_records:
+            if response.resource_records:
+                delete_change = changes.add_change("DELETE", hostname, 'A', response.ttl)
+                for old_value in response.resource_records:
+                    delete_change.add_value(old_value)
+            create_change = changes.add_change("CREATE", hostname, 'A', response.ttl)
+            create_change.add_value(instance_ip)
             for old_value in response.resource_records:
                 create_change.add_value(old_value)
-        create_change.add_value(public_ip)
-        changes.commit()
+    else:
+        create_change = changes.add_change("CREATE", hostname, 'A', response.ttl)
+        create_change.add_value(instance_ip)
+    changes.commit()
 
-def deregister_func(domain_name, instance_id, public_ip):
-    def handler(*args, **kwargs):
-        print "Deregistering instance {} with public IP {} from domain {}".format(instance_id, public_ip, domain_name)
-        response = conn.get_all_rrsets(zone_id, 'A', domain_name, maxitems=1)[0]
-        changes = ResourceRecordSets(conn, zone_id)
-        delete_change = changes.add_change("DELETE", domain_name, 'A', response.ttl)
-        if public_ip in response.resource_records and len(response.resource_records) > 1:
-            create_change = changes.add_change("CREATE", domain_name, 'A', response.ttl)
+def deregister_hostname(hostname, instance_ip, zone_id):
+    response = conn.get_all_rrsets(zone_id, 'A', hostname, maxitems=1)[0]
+    changes = ResourceRecordSets(conn, zone_id)
+    if response.name == (hostname + ".") and instance_ip in response.resource_records:
+        delete_change = changes.add_change("DELETE", hostname, 'A', response.ttl)
+        if len(response.resource_records) > 1:
+            create_change = changes.add_change("CREATE", hostname, 'A', response.ttl)
         for old_value in response.resource_records:
             delete_change.add_value(old_value)
-            if public_ip != old_value:
+            if instance_ip != old_value:
                 create_change.add_value(old_value)
         changes.commit()
+
+def register(public_hostname, private_hostname):
+    if public_hostname:
+        print "Registering instance {} with public IP {} to hostname {}".format(instance_id, public_ip, public_hostname)
+        register_hostname(public_hostname, public_ip, public_zone_id)
+    if private_hostname:
+        print "Registering instance {} with private IP {} to hostname {}".format(instance_id, private_ip, private_hostname)
+        register_hostname(private_hostname, private_ip, private_zone_id)
+
+def deregister_func(public_hostname, private_hostname):
+    def handler(*args, **kwargs):
+        if public_hostname:
+            print "Deregistering instance {} with public IP {} from hostname {}".format(instance_id, public_ip, public_hostname)
+            deregister_hostname(public_hostname, public_ip, public_zone_id)
+        if private_hostname:
+            print "Deregistering instance {} with private IP {} from hostname {}".format(instance_id, private_ip, private_hostname)
+            deregister_hostname(private_hostname, private_ip, private_zone_id)
         sys.exit(0)
     return handler
 
-register(args.domain_name, instance_id, public_ip)
-deregister = deregister_func(args.domain_name, instance_id, public_ip)
+register(args.public_hostname, args.private_hostname)
+deregister = deregister_func(args.public_hostname, args.private_hostname)
+
 signal.signal(signal.SIGTERM, deregister)
 signal.signal(signal.SIGINT, deregister)
 
