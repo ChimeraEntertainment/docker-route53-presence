@@ -28,40 +28,44 @@ def get_zone_id(hostname):
         exit(1)
     return zone.GetHostedZoneResponse.Id.split('/')[2]
 
-instance = urllib2.urlopen('http://169.254.169.254/latest/meta-data/instance-id').read()
+instance_id = urllib2.urlopen('http://169.254.169.254/latest/meta-data/instance-id').read()
 public_ip = urllib2.urlopen('http://169.254.169.254/latest/meta-data/public-ipv4').read()
-
-print "Registering instance {} with public IP {} to domain {}".format(instance, public_ip, args.domain_name)
 zone_id = get_zone_id(args.domain_name)
-response = conn.get_all_rrsets(zone_id, 'A', args.domain_name, maxitems=1)[0]
 
-if public_ip not in response.resource_records:
-    changes = ResourceRecordSets(conn, zone_id)
-    if response.resource_records:
-        delete_change = changes.add_change("DELETE", args.domain_name, 'A', response.ttl)
-    create_change = changes.add_change("CREATE", args.domain_name, 'A', response.ttl)
-    for old_value in response.resource_records:
-            delete_change.add_value(old_value)
-            create_change.add_value(old_value)
-    create_change.add_value(public_ip)
-    changes.commit()
+def register(domain_name, instance_id, public_ip):
+    print "Registering instance {} with public IP {} to domain {}".format(instance_id, public_ip, domain_name)
+    response = conn.get_all_rrsets(zone_id, 'A', domain_name, maxitems=1)[0]
+    if public_ip not in response.resource_records:
+        changes = ResourceRecordSets(conn, zone_id)
+        if response.resource_records and response.name == (domain_name + "."):
+            delete_change = changes.add_change("DELETE", domain_name, 'A', response.ttl)
+            for old_value in response.resource_records:
+                delete_change.add_value(old_value)
+        create_change = changes.add_change("CREATE", domain_name, 'A', response.ttl)
+        if response.name == (domain_name + "."):
+            for old_value in response.resource_records:
+                create_change.add_value(old_value)
+        create_change.add_value(public_ip)
+        changes.commit()
 
-def deregister_func(domain_name, instance):
+def deregister_func(domain_name, instance_id, public_ip):
     def handler(*args, **kwargs):
-        print "Deregistering instance {} from domain {}".format(instance, domain_name)
+        print "Deregistering instance {} with public IP {} from domain {}".format(instance_id, public_ip, domain_name)
+        response = conn.get_all_rrsets(zone_id, 'A', domain_name, maxitems=1)[0]
         changes = ResourceRecordSets(conn, zone_id)
         delete_change = changes.add_change("DELETE", domain_name, 'A', response.ttl)
-        if response.resource_records:
+        if public_ip in response.resource_records and len(response.resource_records) > 1:
             create_change = changes.add_change("CREATE", domain_name, 'A', response.ttl)
         for old_value in response.resource_records:
             delete_change.add_value(old_value)
-            create_change.add_value(old_value)
-        delete_change.add_value(public_ip)
+            if public_ip != old_value:
+                create_change.add_value(old_value)
         changes.commit()
         sys.exit(0)
     return handler
 
-deregister = deregister_func(args.domain_name, instance)
+register(args.domain_name, instance_id, public_ip)
+deregister = deregister_func(args.domain_name, instance_id, public_ip)
 signal.signal(signal.SIGTERM, deregister)
 signal.signal(signal.SIGINT, deregister)
 
