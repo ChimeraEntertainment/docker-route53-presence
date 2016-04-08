@@ -40,35 +40,38 @@ public_zone_id = get_zone_id(args.public_hostname)
 private_zone_id = get_zone_id(args.private_hostname)
 
 def register_hostname(hostname, instance_ip, zone_id):
-    response = conn.get_all_rrsets(zone_id, 'A', hostname, maxitems=1)[0]
     changes = ResourceRecordSets(conn, zone_id)
-    if response.name == (hostname + "."):
-        if instance_ip not in response.resource_records:
-            if response.resource_records:
-                delete_change = changes.add_change("DELETE", hostname, 'A', response.ttl)
-                for old_value in response.resource_records:
+    response = conn.get_all_rrsets(zone_id, 'A', hostname, maxitems=1)
+    if response and response[0].name == (hostname + "."):
+        entry = response[0]
+        if instance_ip not in entry.resource_records:
+            if entry.resource_records:
+                delete_change = changes.add_change("DELETE", hostname, 'A', entry.ttl)
+                for old_value in entry.resource_records:
                     delete_change.add_value(old_value)
-            create_change = changes.add_change("CREATE", hostname, 'A', response.ttl)
+            create_change = changes.add_change("CREATE", hostname, 'A', entry.ttl)
             create_change.add_value(instance_ip)
-            for old_value in response.resource_records:
+            for old_value in entry.resource_records:
                 create_change.add_value(old_value)
     else:
-        create_change = changes.add_change("CREATE", hostname, 'A', response.ttl)
+        create_change = changes.add_change("CREATE", hostname, 'A', 300)
         create_change.add_value(instance_ip)
     changes.commit()
 
 def deregister_hostname(hostname, instance_ip, zone_id):
-    response = conn.get_all_rrsets(zone_id, 'A', hostname, maxitems=1)[0]
     changes = ResourceRecordSets(conn, zone_id)
-    if response.name == (hostname + ".") and instance_ip in response.resource_records:
-        delete_change = changes.add_change("DELETE", hostname, 'A', response.ttl)
-        if len(response.resource_records) > 1:
-            create_change = changes.add_change("CREATE", hostname, 'A', response.ttl)
-        for old_value in response.resource_records:
-            delete_change.add_value(old_value)
-            if instance_ip != old_value:
-                create_change.add_value(old_value)
-        changes.commit()
+    response = conn.get_all_rrsets(zone_id, 'A', hostname, maxitems=1)
+    if response:
+        entry = response[0]
+        if entry.name == (hostname + ".") and instance_ip in entry.resource_records:
+            delete_change = changes.add_change("DELETE", hostname, 'A', entry.ttl)
+            if len(entry.resource_records) > 1:
+                create_change = changes.add_change("CREATE", hostname, 'A', entry.ttl)
+            for old_value in entry.resource_records:
+                delete_change.add_value(old_value)
+                if instance_ip != old_value:
+                    create_change.add_value(old_value)
+            changes.commit()
 
 def register(public_hostname, private_hostname):
     if public_hostname:
