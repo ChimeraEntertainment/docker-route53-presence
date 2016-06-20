@@ -10,14 +10,17 @@ import boto.route53
 from boto.route53.record import ResourceRecordSets
 
 parser = argparse.ArgumentParser(description='Register the local EC2 instance in Route53, updating an existing record')
-parser.add_argument('--public-hostname', metavar='<PUBLIC_HOSTNAME>', default=os.environ.get('PUBLIC_HOSTNAME'), help='Name of AWS Route 53 public hostname that should be used for registration')
-parser.add_argument('--private-hostname', metavar='<PRIVATE_HOSTNAME>', default=os.environ.get('PRIVATE_HOSTNAME'), help='Name of AWS Route 53 private hostname that should be used for registration')
 parser.add_argument('--access-key', metavar='<ACCESS>', default=os.environ.get('AWS_ACCESS_KEY'))
 parser.add_argument('--secret-key', metavar='<SECRET>', default=os.environ.get('AWS_SECRET_KEY'))
+parser.add_argument('--public-hostname', metavar='<PUBLIC_HOSTNAME>', default=os.environ.get('PUBLIC_HOSTNAME'), help='Name of AWS Route 53 public hostname that should be used for registration')
+parser.add_argument('--private-hostname', metavar='<PRIVATE_HOSTNAME>', default=os.environ.get('PRIVATE_HOSTNAME'), help='Name of AWS Route 53 private hostname that should be used for registration')
+parser.add_argument('--ttl', metavar='<TTL>', default=os.environ.get('TTL') or 300, help='TTL of the DNS record that should be used for registration')
+parser.add_argument('--weight', metavar='<WEIGHT>', default=os.environ.get('WEIGHT'), help='Weight of the DNS record that should be used for registration')
+parser.add_argument('--identifier', metavar='<IDENTIFIER>', default=os.environ.get('IDENTIFIER'), help='Set Identifier of the DNS record that should be used for registration')
 args = parser.parse_args()
 
 if args.access_key and args.secret_key:
-    conn = boto.connect_route53(os.environ.get('AWS_ACCESS_KEY'), os.environ.get('AWS_SECRET_KEY'))
+    conn = boto.connect_route53(args.access_key, args.secret_key)
 else:
     conn = boto.connect_route53()
 
@@ -32,68 +35,69 @@ def get_zone_id(hostname):
     else:
         return
 
+public_zone_id = get_zone_id(args.public_hostname)
+private_zone_id = get_zone_id(args.private_hostname)
+
 instance_id = urllib2.urlopen('http://169.254.169.254/latest/meta-data/instance-id').read()
 public_ip = urllib2.urlopen('http://169.254.169.254/latest/meta-data/public-ipv4').read()
 private_ip = urllib2.urlopen('http://169.254.169.254/latest/meta-data/local-ipv4').read()
 
-public_zone_id = get_zone_id(args.public_hostname)
-private_zone_id = get_zone_id(args.private_hostname)
-
-def register_hostname(hostname, instance_ip, zone_id):
+def register_hostname(hostname, instance_ip, zone_id, ttl=300, weight=None, identifier=None):
     changes = ResourceRecordSets(conn, zone_id)
-    response = conn.get_all_rrsets(zone_id, 'A', hostname, maxitems=1)
+    response = conn.get_all_rrsets(zone_id, type='A', name=hostname, identifier=identifier, maxitems=1)
     if response and response[0].name == (hostname + "."):
         entry = response[0]
         if instance_ip not in entry.resource_records:
             if entry.resource_records:
-                delete_change = changes.add_change("DELETE", hostname, 'A', entry.ttl)
+                delete_change = changes.add_change("DELETE", hostname, 'A', ttl=entry.ttl, weight=entry.weight, identifier=entry.identifier)
                 for old_value in entry.resource_records:
                     delete_change.add_value(old_value)
-            create_change = changes.add_change("CREATE", hostname, 'A', entry.ttl)
+            create_change = changes.add_change("CREATE", hostname, 'A', ttl=ttl, weight=weight, identifier=identifier)
             create_change.add_value(instance_ip)
             for old_value in entry.resource_records:
                 create_change.add_value(old_value)
+            changes.commit()
     else:
-        create_change = changes.add_change("CREATE", hostname, 'A', 300)
+        create_change = changes.add_change("CREATE", hostname, 'A', ttl=ttl, weight=weight, identifier=identifier)
         create_change.add_value(instance_ip)
-    changes.commit()
+        changes.commit()
 
-def deregister_hostname(hostname, instance_ip, zone_id):
+def deregister_hostname(hostname, instance_ip, zone_id, ttl=300, weight=None, identifier=None):
     changes = ResourceRecordSets(conn, zone_id)
     response = conn.get_all_rrsets(zone_id, 'A', hostname, maxitems=1)
     if response:
         entry = response[0]
         if entry.name == (hostname + ".") and instance_ip in entry.resource_records:
-            delete_change = changes.add_change("DELETE", hostname, 'A', entry.ttl)
+            delete_change = changes.add_change("DELETE", hostname, 'A', ttl=ttl, weight=weight, identifier=identifier)
             if len(entry.resource_records) > 1:
-                create_change = changes.add_change("CREATE", hostname, 'A', entry.ttl)
+                create_change = changes.add_change("CREATE", hostname, 'A', ttl=ttl, weight=weight, identifier=identifier)
             for old_value in entry.resource_records:
                 delete_change.add_value(old_value)
                 if instance_ip != old_value:
                     create_change.add_value(old_value)
             changes.commit()
 
-def register(public_hostname, private_hostname):
+def register(public_hostname, private_hostname, ttl, weight, identifier):
     if public_hostname:
-        print "Registering instance {} with public IP {} to hostname {}".format(instance_id, public_ip, public_hostname)
-        register_hostname(public_hostname, public_ip, public_zone_id)
+        print "Registering instance {} with public IP {} to hostname {} (TTL={}, weight={}, id={})".format(instance_id, public_ip, public_hostname, ttl, weight, identifier)
+        register_hostname(public_hostname, public_ip, public_zone_id, ttl=ttl, weight=weight, identifier=identifier)
     if private_hostname:
-        print "Registering instance {} with private IP {} to hostname {}".format(instance_id, private_ip, private_hostname)
-        register_hostname(private_hostname, private_ip, private_zone_id)
+        print "Registering instance {} with private IP {} to hostname {} (TTL={}, weight={}, id={})".format(instance_id, private_ip, private_hostname, ttl, weight, identifier)
+        register_hostname(private_hostname, private_ip, private_zone_id, ttl=ttl, weight=weight, identifier=identifier)
 
-def deregister_func(public_hostname, private_hostname):
+def deregister_func(public_hostname, private_hostname, ttl, weight, identifier):
     def handler(*args, **kwargs):
         if public_hostname:
-            print "Deregistering instance {} with public IP {} from hostname {}".format(instance_id, public_ip, public_hostname)
-            deregister_hostname(public_hostname, public_ip, public_zone_id)
+            print "Deregistering instance {} with public IP {} from hostname {} (TTL={}, weight={}, id={})".format(instance_id, public_ip, public_hostname, ttl, weight, identifier)
+            deregister_hostname(public_hostname, public_ip, public_zone_id, ttl=ttl, weight=weight, identifier=identifier)
         if private_hostname:
-            print "Deregistering instance {} with private IP {} from hostname {}".format(instance_id, private_ip, private_hostname)
-            deregister_hostname(private_hostname, private_ip, private_zone_id)
+            print "Deregistering instance {} with private IP {} from hostname {} (TTL={}, weight={}, id={})".format(instance_id, private_ip, private_hostname, ttl, weight, identifier)
+            deregister_hostname(private_hostname, private_ip, private_zone_id, ttl=ttl, weight=weight, identifier=identifier)
         sys.exit(0)
     return handler
 
-register(args.public_hostname, args.private_hostname)
-deregister = deregister_func(args.public_hostname, args.private_hostname)
+register(args.public_hostname, args.private_hostname, args.ttl, args.weight, args.identifier or instance_id if args.weight else None)
+deregister = deregister_func(args.public_hostname, args.private_hostname, args.ttl, args.weight, args.identifier or instance_id if args.weight else None)
 
 signal.signal(signal.SIGTERM, deregister)
 signal.signal(signal.SIGINT, deregister)
